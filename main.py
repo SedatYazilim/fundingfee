@@ -10,6 +10,7 @@ import time
 import json
 import re
 from matplotlib.ticker import MaxNLocator
+import matplotlib.gridspec as gridspec
 
 # Loglama yapılandırması
 logging.basicConfig(
@@ -40,9 +41,9 @@ REQUEST_TIMEOUT = 10  # saniye
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.reply_to(message,
-        "Merhaba! Çoklu Borsa Funding Fee botuna hoş geldiniz.\n\n"
+        "Merhaba! Çoklu Borsa Funding Fee ve Long/Short Oranları botuna hoş geldiniz.\n\n"
         "Kullanmak için bir kripto para birimi sembolü gönderin (örneğin: BTC, ETH).\n"
-        "Size farklı borsalardaki güncel funding fee oranlarını ve bir grafik göstereceğim.\n\n"
+        "Size farklı borsalardaki güncel funding fee oranlarını, long/short oranlarını ve grafiklerini göstereceğim.\n\n"
         "Desteklenen borsalar: " + ", ".join(SUPPORTED_EXCHANGES) + "\n\n"
         "'/analyze SYMBOL' komutuyla yapay zeka destekli analiz alabilirsiniz."
     )
@@ -72,21 +73,24 @@ def get_funding_rates(message):
             symbol = symbol.replace(suffix, '')
     
     # Durum mesajını gönder ve mesaj nesnesini sakla
-    status_message = bot.send_message(message.chat.id, f"🔍 {symbol} için funding fee oranları aranıyor...")
+    status_message = bot.send_message(message.chat.id, f"🔍 {symbol} için veri toplama başlatıldı...")
     
     try:
         # Her aşamada durum mesajını güncelle
         bot.edit_message_text(f"⏳ {symbol} için Binance verileri alınıyor...", 
                               message.chat.id, status_message.message_id)
         binance_data = get_binance_funding(symbol)
+        binance_ls_ratio = get_binance_long_short_ratio(symbol)
         
         bot.edit_message_text(f"⏳ {symbol} için Bybit verileri alınıyor...", 
                               message.chat.id, status_message.message_id)
         bybit_data = get_bybit_funding(symbol)
+        bybit_ls_ratio = get_bybit_long_short_ratio(symbol)
         
         bot.edit_message_text(f"⏳ {symbol} için OKX verileri alınıyor...", 
                               message.chat.id, status_message.message_id)
         okx_data = get_okx_funding(symbol)
+        okx_ls_ratio = get_okx_long_short_ratio(symbol)
         
         bot.edit_message_text(f"⏳ {symbol} için Huobi verileri alınıyor...", 
                               message.chat.id, status_message.message_id)
@@ -104,117 +108,209 @@ def get_funding_rates(message):
                               message.chat.id, status_message.message_id)
         
         funding_data = {}
+        ls_ratio_data = {}
         
         if binance_data:
             funding_data.update(binance_data)
+        if binance_ls_ratio:
+            ls_ratio_data.update(binance_ls_ratio)
+            
         if bybit_data:
             funding_data.update(bybit_data)
+        if bybit_ls_ratio:
+            ls_ratio_data.update(bybit_ls_ratio)
+            
         if okx_data:
             funding_data.update(okx_data)
+        if okx_ls_ratio:
+            ls_ratio_data.update(okx_ls_ratio)
+            
         if huobi_data:
             funding_data.update(huobi_data)
+            
         if gateio_data:
             funding_data.update(gateio_data)
+            
         if bitget_data:
             funding_data.update(bitget_data)
         
-        if not funding_data:
-            bot.edit_message_text(f"❌ Üzgünüm, {symbol} için hiçbir borsada funding fee verisi bulunamadı.", 
+        if not funding_data and not ls_ratio_data:
+            bot.edit_message_text(f"❌ Üzgünüm, {symbol} için hiçbir borsada veri bulunamadı.", 
                                  message.chat.id, status_message.message_id)
             return
         
-        # Veriyi hazırlama
-        exchanges = list(funding_data.keys())
-        rates = list(funding_data.values())
-        
-        # Metin yanıtı hazırlama
+        # Funding Rate Metin Yanıtı
         reply_text = f"📊 *{symbol} için Funding Fee Oranları:*\n\n"
         
-        for exchange, rate in sorted(funding_data.items(), key=lambda x: x[0]):
-            emoji = "🔴" if rate < 0 else "🟢"
-            reply_text += f"{emoji} *{exchange}:* `{rate:.6f}%`\n"
+        if funding_data:
+            for exchange, rate in sorted(funding_data.items(), key=lambda x: x[0]):
+                emoji = "🔴" if rate < 0 else "🟢"
+                reply_text += f"{emoji} *{exchange}:* `{rate:.6f}%`\n"
+        else:
+            reply_text += "Funding fee verisi bulunamadı.\n"
         
-        # Borsa adları için kısaltmalar
-        shortened_exchanges = []
-        for ex in exchanges:
-            if "-" in ex:
-                # Borsa adı ve kontrat bilgisini ayır
-                parts = ex.split("-")
-                shortened_exchanges.append(parts[0])  # Sadece borsa adını al
-            else:
-                shortened_exchanges.append(ex)
+        # Long/Short Ratio Metin Yanıtı
+        reply_text += f"\n📈 *{symbol} için Long/Short Oranları:*\n\n"
+        
+        if ls_ratio_data:
+            for exchange, ratio in sorted(ls_ratio_data.items(), key=lambda x: x[0]):
+                emoji = "🔴" if ratio < 1 else "🟢"
+                long_percentage = (ratio / (ratio + 1)) * 100
+                short_percentage = 100 - long_percentage
+                reply_text += f"{emoji} *{exchange}:* `{ratio:.2f}` (Long: %{long_percentage:.1f}, Short: %{short_percentage:.1f})\n"
+        else:
+            reply_text += "Long/Short oranı verisi bulunamadı.\n"
+        
+        # Grafikler için veri hazırlama
+        has_funding = len(funding_data) > 0
+        has_ls_ratio = len(ls_ratio_data) > 0
         
         # Grafiği oluştur
-        plt.figure(figsize=(12, 7))
-        plt.clf()  # Mevcut figürü temizle
-        bars = plt.bar(range(len(rates)), rates, color=['red' if r < 0 else 'green' for r in rates])
-        plt.title(f"{symbol} Funding Fee Rates Across Exchanges", fontsize=16)
-        plt.xlabel("Exchange", fontsize=14)
-        plt.ylabel("Funding Rate (%)", fontsize=14)
-        plt.xticks(range(len(shortened_exchanges)), shortened_exchanges, rotation=45, ha='right')
-        plt.tight_layout()
-        
-        # Değerleri çubukların üzerine yaz
-        for bar, rate in zip(bars, rates):
-            height = bar.get_height()
-            if rate < 0:
-                plt.text(bar.get_x() + bar.get_width()/2., -0.001, f'{rate:.4f}%',
-                        ha='center', va='top', rotation=90, color='white', fontsize=9)
-            else:
-                plt.text(bar.get_x() + bar.get_width()/2., 0.001, f'{rate:.4f}%',
-                        ha='center', va='bottom', rotation=90, color='white', fontsize=9)
-        
-        # Y ekseni için grid çizgileri
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        
-        # Eksen limitlerini ayarla - ek boşluk için
-        max_rate = max(rates) if rates else 0
-        min_rate = min(rates) if rates else 0
-        padding = max(0.0005, abs(max_rate - min_rate) * 0.1)  # Minimum 0.0005 veya aralığın %10'u
-        plt.ylim(min_rate - padding if min_rate < 0 else -padding, 
-                max_rate + padding)
-        
-        # Grafiği byte array'e dönüştürme
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100)
-        buf.seek(0)
-        
-        # Durum mesajını sil
-        bot.delete_message(message.chat.id, status_message.message_id)
-        
-        try:
-            # Mesajı parçalara böl (Telegram sınırı 4096 karakter)
-            if len(reply_text) > 4000:
-                chunks = [reply_text[i:i+4000] for i in range(0, len(reply_text), 4000)]
-                for chunk in chunks:
-                    bot.send_message(message.chat.id, chunk, parse_mode="Markdown")
-            else:
-                # Markdown formatında metin gönder
-                bot.send_message(message.chat.id, reply_text, parse_mode="Markdown")
+        if has_funding or has_ls_ratio:
+            plt.figure(figsize=(12, 10))
+            plt.clf()  # Mevcut figürü temizle
             
-            # Grafiği gönderme
-            bot.send_photo(message.chat.id, photo=buf, caption=f"*{symbol} Funding Fee Grafiği*", parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Error sending messages: {str(e)}", exc_info=True)
-            # Alternatif olarak normal metin ve grafik gönder
-            plain_text = reply_text.replace('*', '').replace('`', '')
+            # Kaç grafik çizileceğini belirle
+            num_plots = sum([has_funding, has_ls_ratio])
+            gs = gridspec.GridSpec(num_plots, 1, height_ratios=[1] * num_plots)
             
-            # Düz metni parçalar halinde gönder
-            if len(plain_text) > 4000:
-                chunks = [plain_text[i:i+4000] for i in range(0, len(plain_text), 4000)]
-                for chunk in chunks:
-                    bot.send_message(message.chat.id, chunk)
-            else:
-                bot.send_message(message.chat.id, plain_text)
+            current_plot = 0
+            
+            # Funding Rate Grafiği
+            if has_funding:
+                ax1 = plt.subplot(gs[current_plot])
                 
+                # Veri hazırlama
+                exchanges = list(funding_data.keys())
+                rates = list(funding_data.values())
+                
+                # Borsa adları için kısaltmalar
+                shortened_exchanges = []
+                for ex in exchanges:
+                    if "-" in ex:
+                        parts = ex.split("-")
+                        shortened_exchanges.append(parts[0])
+                    else:
+                        shortened_exchanges.append(ex)
+                
+                bars = ax1.bar(range(len(rates)), rates, color=['red' if r < 0 else 'green' for r in rates])
+                ax1.set_title(f"{symbol} Funding Fee Rates", fontsize=14)
+                ax1.set_xlabel("Exchange", fontsize=12)
+                ax1.set_ylabel("Funding Rate (%)", fontsize=12)
+                ax1.set_xticks(range(len(shortened_exchanges)))
+                ax1.set_xticklabels(shortened_exchanges, rotation=45, ha='right')
+                ax1.grid(axis='y', linestyle='--', alpha=0.7)
+                
+                # Değerleri çubukların üzerine yaz
+                for bar, rate in zip(bars, rates):
+                    height = bar.get_height()
+                    if rate < 0:
+                        ax1.text(bar.get_x() + bar.get_width()/2., -0.001, f'{rate:.4f}%',
+                                ha='center', va='top', rotation=90, color='white', fontsize=9)
+                    else:
+                        ax1.text(bar.get_x() + bar.get_width()/2., 0.001, f'{rate:.4f}%',
+                                ha='center', va='bottom', rotation=90, color='white', fontsize=9)
+                
+                # Eksen limitlerini ayarla
+                max_rate = max(rates) if rates else 0
+                min_rate = min(rates) if rates else 0
+                padding = max(0.0005, abs(max_rate - min_rate) * 0.1)
+                ax1.set_ylim(min_rate - padding if min_rate < 0 else -padding, max_rate + padding)
+                
+                current_plot += 1
+            
+            # Long/Short Ratio Grafiği
+            if has_ls_ratio:
+                ax2 = plt.subplot(gs[current_plot])
+                
+                # Veri hazırlama
+                ls_exchanges = list(ls_ratio_data.keys())
+                ls_ratios = list(ls_ratio_data.values())
+                
+                # Borsa adları için kısaltmalar
+                ls_shortened_exchanges = []
+                for ex in ls_exchanges:
+                    if "-" in ex:
+                        parts = ex.split("-")
+                        ls_shortened_exchanges.append(parts[0])
+                    else:
+                        ls_shortened_exchanges.append(ex)
+                
+                # Long ve Short yüzdeleri
+                long_percentages = [(ratio / (ratio + 1)) * 100 for ratio in ls_ratios]
+                short_percentages = [100 - p for p in long_percentages]
+                
+                # Çift çubuk grafik
+                width = 0.35
+                x = range(len(ls_exchanges))
+                ax2.bar([i - width/2 for i in x], long_percentages, width, label='Long %', color='green', alpha=0.7)
+                ax2.bar([i + width/2 for i in x], short_percentages, width, label='Short %', color='red', alpha=0.7)
+                
+                # Grafik özellikleri
+                ax2.set_title(f"{symbol} Long/Short Ratio", fontsize=14)
+                ax2.set_xlabel("Exchange", fontsize=12)
+                ax2.set_ylabel("Percentage (%)", fontsize=12)
+                ax2.set_xticks(range(len(ls_shortened_exchanges)))
+                ax2.set_xticklabels(ls_shortened_exchanges, rotation=45, ha='right')
+                ax2.grid(axis='y', linestyle='--', alpha=0.7)
+                ax2.legend()
+                
+                # Oranları çubukların üzerine yaz
+                for i, (l_pct, s_pct, ratio) in enumerate(zip(long_percentages, short_percentages, ls_ratios)):
+                    ax2.text(i - width/2, l_pct + 1, f"{l_pct:.1f}%", ha='center', va='bottom', fontsize=9)
+                    ax2.text(i + width/2, s_pct + 1, f"{s_pct:.1f}%", ha='center', va='bottom', fontsize=9)
+                    ax2.text(i, 50, f"Ratio: {ratio:.2f}", ha='center', va='center', fontsize=10, 
+                            bbox=dict(facecolor='white', alpha=0.7, boxstyle='round,pad=0.3'))
+                
+                # Y eksenini 0-100 arası ayarla
+                ax2.set_ylim(0, 100)
+            
+            plt.tight_layout()
+            
+            # Grafiği byte array'e dönüştürme
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100)
             buf.seek(0)
-            bot.send_photo(message.chat.id, photo=buf, caption=f"{symbol} Funding Fee Grafiği")
-        
-        # Analiz butonu ekleme
-        markup = types.InlineKeyboardMarkup()
-        analyze_button = types.InlineKeyboardButton("AI Analizi İste", callback_data=f"analyze_{symbol}")
-        markup.add(analyze_button)
-        bot.send_message(message.chat.id, "Yapay zeka analizi için butona tıklayabilirsiniz:", reply_markup=markup)
+            
+            # Durum mesajını sil
+            bot.delete_message(message.chat.id, status_message.message_id)
+            
+            try:
+                # Mesajı parçalara böl (Telegram sınırı 4096 karakter)
+                if len(reply_text) > 4000:
+                    chunks = split_message(reply_text, 4000)
+                    for chunk in chunks:
+                        bot.send_message(message.chat.id, chunk, parse_mode="Markdown")
+                else:
+                    # Markdown formatında metin gönder
+                    bot.send_message(message.chat.id, reply_text, parse_mode="Markdown")
+                
+                # Grafiği gönderme
+                bot.send_photo(message.chat.id, photo=buf, caption=f"*{symbol} Funding Fee ve Long/Short Grafiği*", parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Error sending messages: {str(e)}", exc_info=True)
+                # Alternatif olarak normal metin ve grafik gönder
+                plain_text = reply_text.replace('*', '').replace('`', '')
+                
+                # Düz metni parçalar halinde gönder
+                if len(plain_text) > 4000:
+                    chunks = split_message(plain_text, 4000)
+                    for chunk in chunks:
+                        bot.send_message(message.chat.id, chunk)
+                else:
+                    bot.send_message(message.chat.id, plain_text)
+                    
+                buf.seek(0)
+                bot.send_photo(message.chat.id, photo=buf, caption=f"{symbol} Funding Fee ve Long/Short Grafiği")
+            
+            # Analiz butonu ekleme
+            markup = types.InlineKeyboardMarkup()
+            analyze_button = types.InlineKeyboardButton("AI Analizi İste", callback_data=f"analyze_{symbol}")
+            markup.add(analyze_button)
+            bot.send_message(message.chat.id, "Yapay zeka analizi için butona tıklayabilirsiniz:", reply_markup=markup)
+        else:
+            bot.edit_message_text(f"❌ Üzgünüm, {symbol} için grafiklendirilecek veri bulunamadı.", 
+                                message.chat.id, status_message.message_id)
         
     except Exception as e:
         logger.error(f"Error: {str(e)}", exc_info=True)
@@ -245,6 +341,35 @@ def get_binance_funding(symbol):
         return funding_data
     except Exception as e:
         logger.warning(f"Binance API error: {str(e)}")
+        return {}
+
+def get_binance_long_short_ratio(symbol):
+    """Binance'den long/short oranını çeker"""
+    try:
+        url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={symbol}USDT&period=5m"
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        
+        if response.status_code != 200:
+            # USD çiftini dene
+            url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={symbol}USD&period=5m"
+            response = requests.get(url, timeout=REQUEST_TIMEOUT)
+            
+            if response.status_code != 200:
+                return {}
+        
+        data = response.json()
+        
+        if not data or len(data) == 0:
+            return {}
+        
+        # En son veriyi al
+        latest = data[0]
+        ratio = float(latest['longShortRatio'])  # Long/Short oranı
+        
+        ls_data = {f"Binance-{symbol}": ratio}
+        return ls_data
+    except Exception as e:
+        logger.warning(f"Binance L/S API error: {str(e)}")
         return {}
 
 def get_bybit_funding(symbol):
@@ -285,6 +410,46 @@ def get_bybit_funding(symbol):
         logger.warning(f"Bybit API error: {str(e)}")
         return {}
 
+def get_bybit_long_short_ratio(symbol):
+    """Bybit'ten long/short oranını çeker"""
+    try:
+        # USDT çifti
+        url = f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={symbol}USDT&period=5min"
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        
+        ls_data = {}
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
+                latest = data['result']['list'][0]
+                if 'longRatio' in latest and 'shortRatio' in latest:
+                    long_ratio = float(latest['longRatio'])
+                    short_ratio = float(latest['shortRatio'])
+                    if short_ratio > 0:  # Sıfıra bölünmeyi önle
+                        ratio = long_ratio / short_ratio
+                        ls_data[f"Bybit-{symbol}USDT"] = ratio
+        
+        # USD çifti
+        url = f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={symbol}USD&period=5min"
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
+                latest = data['result']['list'][0]
+                if 'longRatio' in latest and 'shortRatio' in latest:
+                    long_ratio = float(latest['longRatio'])
+                    short_ratio = float(latest['shortRatio'])
+                    if short_ratio > 0:  # Sıfıra bölünmeyi önle
+                        ratio = long_ratio / short_ratio
+                        ls_data[f"Bybit-{symbol}USD"] = ratio
+                
+        return ls_data
+    except Exception as e:
+        logger.warning(f"Bybit L/S API error: {str(e)}")
+        return {}
+
 def get_okx_funding(symbol):
     """OKX'ten funding rate verilerini çeker"""
     try:
@@ -309,6 +474,31 @@ def get_okx_funding(symbol):
         return funding_data
     except Exception as e:
         logger.warning(f"OKX API error: {str(e)}")
+        return {}
+
+def get_okx_long_short_ratio(symbol):
+    """OKX'ten long/short oranını çeker"""
+    try:
+        ls_data = {}
+        
+        for quote in ['USDT', 'USD']:
+            url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={symbol}&period=5m"
+            response = requests.get(url, timeout=REQUEST_TIMEOUT)
+            
+            if response.status_code != 200:
+                continue
+                
+            data = response.json()
+            
+            if data.get('data') and len(data['data']) > 0:
+                latest = data['data'][0]
+                if 'longShortRatio' in latest:
+                    ratio = float(latest['longShortRatio'])
+                    ls_data[f"OKX-{symbol}-{quote}"] = ratio
+        
+        return ls_data
+    except Exception as e:
+        logger.warning(f"OKX L/S API error: {str(e)}")
         return {}
 
 def get_huobi_funding(symbol):
@@ -465,10 +655,17 @@ def get_ai_analysis(message, symbol, is_callback=False, status_message=None):
         
         # Tüm borsalardan veri topla
         funding_data = {}
+        ls_ratio_data = {}
         
         binance_data = get_binance_funding(symbol)
+        binance_ls_ratio = get_binance_long_short_ratio(symbol)
+        
         bybit_data = get_bybit_funding(symbol)
+        bybit_ls_ratio = get_bybit_long_short_ratio(symbol)
+        
         okx_data = get_okx_funding(symbol)
+        okx_ls_ratio = get_okx_long_short_ratio(symbol)
+        
         huobi_data = get_huobi_funding(symbol)
         gateio_data = get_gateio_funding(symbol)
         bitget_data = get_bitget_funding(symbol)
@@ -480,7 +677,11 @@ def get_ai_analysis(message, symbol, is_callback=False, status_message=None):
         funding_data.update(gateio_data)
         funding_data.update(bitget_data)
         
-        if not funding_data:
+        ls_ratio_data.update(binance_ls_ratio)
+        ls_ratio_data.update(bybit_ls_ratio)
+        ls_ratio_data.update(okx_ls_ratio)
+        
+        if not funding_data and not ls_ratio_data:
             if status_message:
                 bot.edit_message_text(f"❌ Üzgünüm, {symbol} için hiçbir borsada veri bulunamadı.", 
                                      message.chat.id, status_message.message_id)
@@ -493,68 +694,158 @@ def get_ai_analysis(message, symbol, is_callback=False, status_message=None):
                                 message.chat.id, status_message.message_id)
         
         # Güncel funding fee özeti hazırlama
-        funding_summary = "\n\n*Güncel Funding Fee Oranları:*\n"
-        for exchange, rate in sorted(funding_data.items(), key=lambda x: x[0]):
-            emoji = "🔴" if rate < 0 else "🟢"
-            funding_summary += f"{emoji} *{exchange}:* `{rate:.6f}%`\n"
+        funding_summary = ""
+        if funding_data:
+            funding_summary = "\n\n*Güncel Funding Fee Oranları:*\n"
+            for exchange, rate in sorted(funding_data.items(), key=lambda x: x[0]):
+                emoji = "🔴" if rate < 0 else "🟢"
+                funding_summary += f"{emoji} *{exchange}:* `{rate:.6f}%`\n"
+        
+        # Güncel Long/Short oranları özeti
+        ls_summary = ""
+        if ls_ratio_data:
+            ls_summary = "\n\n*Güncel Long/Short Oranları:*\n"
+            for exchange, ratio in sorted(ls_ratio_data.items(), key=lambda x: x[0]):
+                emoji = "🔴" if ratio < 1 else "🟢"
+                long_percentage = (ratio / (ratio + 1)) * 100
+                short_percentage = 100 - long_percentage
+                ls_summary += f"{emoji} *{exchange}:* `{ratio:.2f}` (Long: %{long_percentage:.1f}, Short: %{short_percentage:.1f})\n"
         
         # Grafiği hazırla
-        plt.figure(figsize=(10, 6))
-        plt.clf()  # Mevcut figürü temizle
+        has_funding = len(funding_data) > 0
+        has_ls_ratio = len(ls_ratio_data) > 0
         
-        # Veri hazırlama
-        exchanges = list(funding_data.keys())
-        rates = list(funding_data.values())
-        
-        # Borsa adları için kısaltmalar
-        shortened_exchanges = []
-        for ex in exchanges:
-            if "-" in ex:
-                parts = ex.split("-")
-                shortened_exchanges.append(parts[0])
-            else:
-                shortened_exchanges.append(ex)
-        
-        # Çubuk grafik oluştur
-        bars = plt.bar(range(len(rates)), rates, color=['red' if r < 0 else 'green' for r in rates])
-        plt.title(f"{symbol} Funding Fee Rates", fontsize=16)
-        plt.xlabel("Exchange", fontsize=14)
-        plt.ylabel("Funding Rate (%)", fontsize=14)
-        plt.xticks(range(len(shortened_exchanges)), shortened_exchanges, rotation=45, ha='right')
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.tight_layout()
-        
-        # Değerleri çubukların üzerine yaz
-        for bar, rate in zip(bars, rates):
-            height = bar.get_height()
-            if rate < 0:
-                plt.text(bar.get_x() + bar.get_width()/2., -0.001, f'{rate:.4f}%',
-                        ha='center', va='top', rotation=90, color='white', fontsize=9)
-            else:
-                plt.text(bar.get_x() + bar.get_width()/2., 0.001, f'{rate:.4f}%',
-                        ha='center', va='bottom', rotation=90, color='white', fontsize=9)
-        
-        # Eksen limitlerini ayarla
-        max_rate = max(rates) if rates else 0
-        min_rate = min(rates) if rates else 0
-        padding = max(0.0005, abs(max_rate - min_rate) * 0.1)
-        plt.ylim(min_rate - padding if min_rate < 0 else -padding, max_rate + padding)
-        
-        # Grafiği byte array'e dönüştürme
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100)
-        buf.seek(0)
+        if has_funding or has_ls_ratio:
+            plt.figure(figsize=(12, 10))
+            plt.clf()  # Mevcut figürü temizle
+            
+            # Kaç grafik çizileceğini belirle
+            num_plots = sum([has_funding, has_ls_ratio])
+            gs = gridspec.GridSpec(num_plots, 1, height_ratios=[1] * num_plots)
+            
+            current_plot = 0
+            
+            # Funding Rate Grafiği
+            if has_funding:
+                ax1 = plt.subplot(gs[current_plot])
+                
+                # Veri hazırlama
+                exchanges = list(funding_data.keys())
+                rates = list(funding_data.values())
+                
+                # Borsa adları için kısaltmalar
+                shortened_exchanges = []
+                for ex in exchanges:
+                    if "-" in ex:
+                        parts = ex.split("-")
+                        shortened_exchanges.append(parts[0])
+                    else:
+                        shortened_exchanges.append(ex)
+                
+                bars = ax1.bar(range(len(rates)), rates, color=['red' if r < 0 else 'green' for r in rates])
+                ax1.set_title(f"{symbol} Funding Fee Rates", fontsize=14)
+                ax1.set_xlabel("Exchange", fontsize=12)
+                ax1.set_ylabel("Funding Rate (%)", fontsize=12)
+                ax1.set_xticks(range(len(shortened_exchanges)))
+                ax1.set_xticklabels(shortened_exchanges, rotation=45, ha='right')
+                ax1.grid(axis='y', linestyle='--', alpha=0.7)
+                
+                # Değerleri çubukların üzerine yaz
+                for bar, rate in zip(bars, rates):
+                    height = bar.get_height()
+                    if rate < 0:
+                        ax1.text(bar.get_x() + bar.get_width()/2., -0.001, f'{rate:.4f}%',
+                                ha='center', va='top', rotation=90, color='white', fontsize=9)
+                    else:
+                        ax1.text(bar.get_x() + bar.get_width()/2., 0.001, f'{rate:.4f}%',
+                                ha='center', va='bottom', rotation=90, color='white', fontsize=9)
+                
+                # Eksen limitlerini ayarla
+                max_rate = max(rates) if rates else 0
+                min_rate = min(rates) if rates else 0
+                padding = max(0.0005, abs(max_rate - min_rate) * 0.1)
+                ax1.set_ylim(min_rate - padding if min_rate < 0 else -padding, max_rate + padding)
+                
+                current_plot += 1
+            
+            # Long/Short Ratio Grafiği
+            if has_ls_ratio:
+                ax2 = plt.subplot(gs[current_plot])
+                
+                # Veri hazırlama
+                ls_exchanges = list(ls_ratio_data.keys())
+                ls_ratios = list(ls_ratio_data.values())
+                
+                # Borsa adları için kısaltmalar
+                ls_shortened_exchanges = []
+                for ex in ls_exchanges:
+                    if "-" in ex:
+                        parts = ex.split("-")
+                        ls_shortened_exchanges.append(parts[0])
+                    else:
+                        ls_shortened_exchanges.append(ex)
+                
+                # Long ve Short yüzdeleri
+                long_percentages = [(ratio / (ratio + 1)) * 100 for ratio in ls_ratios]
+                short_percentages = [100 - p for p in long_percentages]
+                
+                # Çift çubuk grafik
+                width = 0.35
+                x = range(len(ls_exchanges))
+                ax2.bar([i - width/2 for i in x], long_percentages, width, label='Long %', color='green', alpha=0.7)
+                ax2.bar([i + width/2 for i in x], short_percentages, width, label='Short %', color='red', alpha=0.7)
+                
+                # Grafik özellikleri
+                ax2.set_title(f"{symbol} Long/Short Ratio", fontsize=14)
+                ax2.set_xlabel("Exchange", fontsize=12)
+                ax2.set_ylabel("Percentage (%)", fontsize=12)
+                ax2.set_xticks(range(len(ls_shortened_exchanges)))
+                ax2.set_xticklabels(ls_shortened_exchanges, rotation=45, ha='right')
+                ax2.grid(axis='y', linestyle='--', alpha=0.7)
+                ax2.legend()
+                
+                # Oranları çubukların üzerine yaz
+                for i, (l_pct, s_pct, ratio) in enumerate(zip(long_percentages, short_percentages, ls_ratios)):
+                    ax2.text(i - width/2, l_pct + 1, f"{l_pct:.1f}%", ha='center', va='bottom', fontsize=9)
+                    ax2.text(i + width/2, s_pct + 1, f"{s_pct:.1f}%", ha='center', va='bottom', fontsize=9)
+                    ax2.text(i, 50, f"Ratio: {ratio:.2f}", ha='center', va='center', fontsize=10, 
+                            bbox=dict(facecolor='white', alpha=0.7, boxstyle='round,pad=0.3'))
+                
+                # Y eksenini 0-100 arası ayarla
+                ax2.set_ylim(0, 100)
+            
+            plt.tight_layout()
+            
+            # Grafiği byte array'e dönüştürme
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100)
+            buf.seek(0)
         
         # AI prompt hazırlama
         prompt = f"""
-        {symbol} kripto para birimi için farklı borsalardaki funding fee oranları aşağıdaki gibidir:
+        {symbol} kripto para birimi için farklı borsalardaki veriler aşağıdaki gibidir:
         
-        {', '.join([f"{exchange}: {rate:.6f}%" for exchange, rate in funding_data.items()])}
+        """
         
-        Bu funding fee oranlarını analiz et ve şunları açıkla:
-        1. Bu oranlar ne anlama geliyor?
+        if funding_data:
+            prompt += "Funding Fee Oranları:\n"
+            for exchange, rate in sorted(funding_data.items(), key=lambda x: x[0]):
+                prompt += f"{exchange}: {rate:.6f}%\n"
+            prompt += "\n"
+        
+        if ls_ratio_data:
+            prompt += "Long/Short Oranları:\n"
+            for exchange, ratio in sorted(ls_ratio_data.items(), key=lambda x: x[0]):
+                long_percentage = (ratio / (ratio + 1)) * 100
+                short_percentage = 100 - long_percentage
+                prompt += f"{exchange}: {ratio:.2f} (Long: %{long_percentage:.1f}, Short: %{short_percentage:.1f})\n"
+            prompt += "\n"
+        
+        prompt += """
+        Bu verileri analiz et ve şunları açıkla:
+        1. Funding fee oranları ve long/short oranları ne anlama geliyor?
         2. Borsalar arasındaki farklar ne ifade ediyor?
-        3. Bu verilere dayanarak {symbol} için kısa vadeli piyasa eğilimi nedir?
+        3. Bu verilere dayanarak piyasa eğilimi nedir?
         4. Arbitraj fırsatları var mı?
         5. Yatırımcılar için öneriler neler olabilir?
         
@@ -595,11 +886,12 @@ def get_ai_analysis(message, symbol, is_callback=False, status_message=None):
             bot.delete_message(message.chat.id, status_message.message_id)
         
         try:
-            # Önce grafiği gönder
-            bot.send_photo(message.chat.id, photo=buf, caption=f"*{symbol} Funding Fee Grafiği*", parse_mode="Markdown")
+            # Önce grafiği gönder (eğer varsa)
+            if has_funding or has_ls_ratio:
+                bot.send_photo(message.chat.id, photo=buf, caption=f"*{symbol} Funding Fee ve Long/Short Grafiği*", parse_mode="Markdown")
             
             # Başlık mesajı
-            header = f"🤖 *{symbol} Funding Fee Analizi:*\n\n"
+            header = f"🤖 *{symbol} Analizi:*\n\n"
             bot.send_message(message.chat.id, header, parse_mode="Markdown")
             
             # Analiz metnini böl ve gönder
@@ -608,24 +900,36 @@ def get_ai_analysis(message, symbol, is_callback=False, status_message=None):
                 bot.send_message(message.chat.id, part, parse_mode="Markdown")
             
             # Funding özeti gönder
-            bot.send_message(message.chat.id, funding_summary, parse_mode="Markdown")
+            if funding_summary:
+                bot.send_message(message.chat.id, funding_summary, parse_mode="Markdown")
+            
+            # Long/Short özeti gönder
+            if ls_summary:
+                bot.send_message(message.chat.id, ls_summary, parse_mode="Markdown")
             
         except Exception as e:
             logger.error(f"Error sending analysis: {str(e)}", exc_info=True)
             # Alternatif olarak formatsız gönder
-            bot.send_photo(message.chat.id, photo=buf, caption=f"{symbol} Funding Fee Grafiği")
+            if has_funding or has_ls_ratio:
+                bot.send_photo(message.chat.id, photo=buf, caption=f"{symbol} Funding Fee ve Long/Short Grafiği")
             
             # Analiz metnini düz metin olarak böl ve gönder
             plain_analysis = analysis.replace('**', '').replace('*', '')
             analysis_parts = split_message(plain_analysis, 3800)
             
-            bot.send_message(message.chat.id, f"🤖 {symbol} Funding Fee Analizi:")
+            bot.send_message(message.chat.id, f"🤖 {symbol} Analizi:")
             for part in analysis_parts:
                 bot.send_message(message.chat.id, part)
             
             # Funding özeti düz metin olarak gönder
-            plain_summary = funding_summary.replace('*', '').replace('`', '')
-            bot.send_message(message.chat.id, plain_summary)
+            if funding_summary:
+                plain_funding = funding_summary.replace('*', '').replace('`', '')
+                bot.send_message(message.chat.id, plain_funding)
+            
+            # Long/Short özeti düz metin olarak gönder
+            if ls_summary:
+                plain_ls = ls_summary.replace('*', '').replace('`', '')
+                bot.send_message(message.chat.id, plain_ls)
             
     except Exception as e:
         logger.error(f"AI analysis error: {str(e)}", exc_info=True)
